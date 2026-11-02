@@ -178,6 +178,7 @@ const EVENTOS = {
   latido: 'Collar vivo', despierto: 'Collar buscando', duerme: 'Collar dormido',
   bateria50: 'Batería del collar por debajo del 50 %', bateria10: 'Batería del collar por debajo del 10 %',
   arranque: 'El collar se reinició',
+  ping: 'El collar respondió (batería al día)',
 };
 
 function linea(txt) {
@@ -239,6 +240,8 @@ async function abrir() {
   $('btnBuscar').disabled = $('btnDormir').disabled = false;
   estado('Receptor conectado. Esperando datos del collar…');
   enviar('estado');
+  // Si no hay un dato reciente del collar, pedirle la bateria (no prende el GPS; gasta muy poco)
+  if (!ultimo || Date.now() - ultimo.t > 3600e3) enviar('ping');
 }
 
 async function desconectado() {
