@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1d5c3a">
+<title>Juando</title>
+<link rel="manifest" href="./manifest.json">
+<link rel="icon" href="./iconos/icono-192.png">
+<link rel="apple-touch-icon" href="./iconos/icono-192.png">
+<link rel="stylesheet" href="./vendor/leaflet.min.css">
+<script src="./vendor/leaflet.min.js"></script>
+<script src="./vendor/pmtiles.js"></script>
+<script src="./vendor/protomaps-leaflet.js"></script>
+<style>
+  :root { --verde:#1d5c3a; --fondo:#f4f4f1; --tinta:#1b1b1b; --gris:#6b6b6b; --borde:#d9d9d4; --rojo:#b3261e; --ambar:#a76400; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--fondo); color:var(--tinta);
+    font: 16px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { display:flex; flex-direction:column; }
+  header { display:flex; align-items:center; gap:10px; padding:10px 14px; background:var(--verde); color:#fff; }
+  header h1 { font-size:18px; margin:0; flex:1; }
+  #conexion { font-size:13px; opacity:.9; }
+  #mapa { flex:1; min-height:200px; }
+  .panel { padding:10px 14px 14px; background:#fff; border-top:1px solid var(--borde); }
+  .datos { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; margin-bottom:10px; }
+  .dato { background:var(--fondo); border-radius:10px; padding:8px; }
+  .dato b { display:block; font-size:18px; }
+  .dato span { font-size:12px; color:var(--gris); }
+  #estado { font-size:14px; color:var(--gris); margin-bottom:10px; min-height:1.3em; }
+  .botones { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  button { font:inherit; font-weight:600; border:0; border-radius:12px; padding:14px; cursor:pointer; }
+  button:disabled { opacity:.4; }
+  #btnConectar { grid-column:1 / -1; background:var(--verde); color:#fff; }
+  #btnBuscar { background:#e3efe7; color:var(--verde); }
+  #btnDormir { background:#ecebe6; color:var(--tinta); }
+  #btnCentrar { position:absolute; right:12px; top:72px; z-index:1000; padding:10px 12px; border-radius:10px;
+    background:#fff; color:var(--tinta); box-shadow:0 1px 4px rgba(0,0,0,.25); font-size:14px; }
+  #zonas { position:absolute; left:12px; top:72px; z-index:1000; display:flex; gap:6px; }
+  #zonas button { padding:8px 10px; border-radius:10px; font-size:13px; background:#fff; color:var(--tinta);
+    box-shadow:0 1px 4px rgba(0,0,0,.25); font-weight:500; }
+  #zonas button.activa { background:var(--verde); color:#fff; }
+  #mapa { background:#e9e7df; }
+  details { margin-top:10px; font-size:12px; color:var(--gris); }
+  #registro { max-height:140px; overflow:auto; font-family:ui-monospace, monospace; white-space:pre-wrap; word-break:break-all; }
+  .alerta { color:var(--rojo); }
+  #aviso { display:block; width:100%; border-radius:0; padding:10px 14px; background:#ffe9a8; color:var(--tinta); font-size:14px; }
+  #btnAvisos { width:100%; margin-bottom:8px; padding:10px; background:#fff4d6; color:var(--ambar); font-size:14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Juando</h1>
+  <div id="conexion">desconectado</div>
+</header>
+<button id="aviso" hidden>Hay una versión nueva de la app. Tocá acá para actualizar (después volvé a conectar el receptor).</button>
+<div id="mapa"></div>
+<button id="btnCentrar" hidden>Centrar collar</button>
+<div id="zonas"><button data-zona="la_plata">La Plata</button><button data-zona="la_cumbre">La Cumbre</button></div>
+<div class="panel">
+  <div class="datos">
+    <div class="dato"><b id="dVisto">—</b><span>último dato</span></div>
+    <div class="dato"><b id="dBat">—</b><span>batería collar</span></div>
+    <div class="dato"><b id="dSenal">—</b><span>señal (SNR)</span></div>
+  </div>
+  <div id="estado">Tocá «Conectar receptor» para empezar.</div>
+  <button id="btnAvisos" hidden>Activar avisos de batería del collar</button>
+  <div class="botones">
+    <button id="btnConectar">Conectar receptor</button>
+    <button id="btnBuscar" disabled>Buscar</button>
+    <button id="btnDormir" disabled>Dormir</button>
+  </div>
+  <details>
+    <summary>Registro</summary>
+    <p id="regInfo"></p>
+    <button id="btnExportar" style="padding:8px 12px;font-size:13px;background:#ecebe6">Descargar registro</button>
+    <div id="registro"></div>
+  </details>
+</div>
+<script>
+// Nordic UART Service, el mismo que anuncia el receptor
+const NUS = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const NUS_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';   // escribimos ordenes
+const NUS_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';   // nos llegan lineas JSON
+
+const RECEPTOR_CON_BATERIA = false;
+const $ = id => document.getElementById(id);
+let dispositivo, rx, resto = '', ultimo = null, marcador, centrado = false;
+
+// ---------- mapa offline
+// Cada zona es un recorte de OpenStreetMap (Protomaps) en mapas/*.pmtiles, hecho con
+// herramientas/extraer_mapa.py. El service worker los guarda en el celular, asi que andan sin internet.
+const ZONAS = {
+  la_plata:  { nombre: 'La Plata',  caja: [[-35.05, -58.15], [-34.80, -57.80]], centro: [-34.92, -57.95] },
+  la_cumbre: { nombre: 'La Cumbre', caja: [[-31.12, -64.65], [-30.85, -64.35]], centro: [-30.9826, -64.4939] },
+};
+const mapa = L.map('mapa', { zoomControl: false, maxZoom: 19 });
+mapa.attributionControl.setPrefix(false);
+let capa = null, zonaActual = null;
+
+async function verZona(clave, centrar) {
+  const z = ZONAS[clave];
+  if (zonaActual !== clave) {
+    zonaActual = clave;
+    document.querySelectorAll('#zonas button').forEach(b => b.classList.toggle('activa', b.dataset.zona === clave));
+    try {
+      const r = await fetch('./mapas/' + clave + '.pmtiles');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const archivo = new File([await r.blob()], clave + '.pmtiles');
+      if (capa) mapa.removeLayer(capa);
+      capa = protomapsL.leafletLayer({
+        url: new pmtiles.PMTiles(new pmtiles.FileSource(archivo)),
+        flavor: 'light', lang: 'es', maxDataZoom: 15,
+        attribution: '© <a href="https://openstreetmap.org/copyright">OpenStreetMap</a> · Protomaps',
+      });
+      capa.addTo(mapa);
+      guardar('zona', clave);
+    } catch (e) { estado('No se pudo cargar el mapa de ' + z.nombre + ': ' + e.message, 'alerta'); }
+  }
+  if (centrar) mapa.setView(z.centro, 14);
+}
+function zonaDe(lat, lon) {
+  for (const [k, z] of Object.entries(ZONAS))
+    if (lat >= z.caja[0][0] && lat <= z.caja[1][0] && lon >= z.caja[0][1] && lon <= z.caja[1][1]) return k;
+  return null;
+}
+document.querySelectorAll('#zonas button').forEach(b => b.onclick = () => verZona(b.dataset.zona, true));
+let rastro = L.polyline([], { color: '#1d5c3a', weight: 3, opacity: .6 }).addTo(mapa);
+
+function guardar(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+function leer(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } }
+
+// ---------- utilidades
+function porciento(mv) {   // misma tabla que firmware/comun/juando.h
+  const t = [3300,3500,3580,3650,3700,3740,3780,3830,3900,3980,4080,4200];
+  const p = [0,5,10,20,30,40,50,60,70,80,90,100];
+  if (mv <= t[0]) return 0;
+  for (let i = 1; i < t.length; i++)
+    if (mv <= t[i]) return Math.round(p[i-1] + (p[i]-p[i-1]) * (mv - t[i-1]) / (t[i] - t[i-1]));
+  return 100;
+}
+function hace(t) {
+  const s = Math.round((Date.now() - t) / 1000);
+  if (s < 60) return s + ' s';
+  if (s < 3600) return Math.round(s / 60) + ' min';
+  return Math.round(s / 3600) + ' h';
+}
+function anotar(txt, clase) {
+  const r = $('registro'), d = document.createElement('div');
+  d.textContent = new Date().toLocaleTimeString('es-AR', { hour12: false }) + ' ' + txt;
+  if (clase) d.className = clase;
+  r.prepend(d);
+  while (r.childNodes.length > 200) r.lastChild.remove();
+}
+function estado(txt, clase) { $('estado').textContent = txt; $('estado').className = clase || ''; }
+
+// ---------- datos del collar
+function mostrar() {
+  if (!ultimo) return;
+  $('dVisto').textContent = hace(ultimo.t);
+  if (ultimo.mv) $('dBat').textContent = porciento(ultimo.mv) + ' %';
+  if (ultimo.snr != null) $('dSenal').textContent = ultimo.snr.toFixed(1) + ' dB';
+}
+setInterval(mostrar, 5000);
+
+function posicion(lat, lon, sats) {
+  const ll = [lat, lon];
+  const zn = zonaDe(lat, lon);
+  if (zn && zn !== zonaActual) verZona(zn, false);
+  if (!marcador) marcador = L.circleMarker(ll, { radius: 9, color: '#fff', weight: 3, fillColor: '#1d5c3a', fillOpacity: 1 }).addTo(mapa);
+  marcador.setLatLng(ll).bindPopup('Collar · ' + sats + ' satélites');
+  rastro.addLatLng(ll);
+  $('btnCentrar').hidden = false;
+  if (!centrado) { mapa.setView(ll, 17); centrado = true; }
+}
+
+const EVENTOS = {
+  latido: 'Collar vivo', despierto: 'Collar buscando', duerme: 'Collar dormido',
+  bateria50: 'Batería del collar por debajo del 50 %', bateria10: 'Batería del collar por debajo del 10 %',
+  arranque: 'El collar se reinició',
+};
+
+function linea(txt) {
+  let m;
+  try { m = JSON.parse(txt); } catch (e) { anotar('? ' + txt); return; }
+  anotar(txt);
+  registrar(m);
+  if (m.t === 'pos') {
+    ultimo = { t: Date.now(), mv: m.mv, snr: m.snr_x10 / 10 };
+    revisarBateria(m.mv);
+    if (m.lat_e7 || m.lon_e7) {
+      posicion(m.lat_e7 / 1e7, m.lon_e7 / 1e7, m.sats);
+      estado('Posición recibida · ' + m.sats + ' satélites');
+      guardar('ultima', { lat: m.lat_e7 / 1e7, lon: m.lon_e7 / 1e7, t: Date.now() });
+    } else estado('Collar buscando satélites…');
+  } else if (m.t === 'estado') {
+    ultimo = { t: Date.now(), mv: m.mv, snr: m.snr_x10 / 10 };
+    const alerta = m.evento.startsWith('bateria') || m.evento === 'arranque';
+    estado(EVENTOS[m.evento] || m.evento, alerta ? 'alerta' : '');
+    if (m.evento === 'latido' && m.band & 1) estado('Collar buscando satélites…');
+    revisarBateria(m.mv);
+  } else if (m.t === 'enviado') {
+    estado(m.err ? 'Error al enviar «' + m.orden + '» (' + m.err + ')' : 'Orden «' + m.orden + '» enviada, esperando respuesta…', m.err ? 'alerta' : '');
+  } else if (m.t === 'receptor') {
+    // El receptor todavia no tiene bateria: sin ella, la lectura es la salida del cargador y no
+    // significa nada. Cuando tenga, poner RECEPTOR_CON_BATERIA en true.
+    if (RECEPTOR_CON_BATERIA) $('conexion').textContent = 'receptor ' + porciento(m.mv) + ' %';
+  } else if (m.t === 'error') {
+    estado('Error en el receptor: ' + txt, 'alerta');
+  }
+  mostrar();
+}
+
+// ---------- Bluetooth
+async function conectar() {
+  if (!navigator.bluetooth) { estado('Este navegador no tiene Bluetooth web. Usá Chrome en Android.', 'alerta'); return; }
+  try {
+    dispositivo = await navigator.bluetooth.requestDevice({ filters: [{ services: [NUS] }] });
+    dispositivo.addEventListener('gattserverdisconnected', desconectado);
+    await abrir();
+  } catch (e) { estado('No se conectó: ' + e.message, 'alerta'); }
+}
+
+async function abrir() {
+  $('conexion').textContent = 'conectando…';
+  const gatt = await dispositivo.gatt.connect();
+  const s = await gatt.getPrimaryService(NUS);
+  rx = await s.getCharacteristic(NUS_RX);
+  const tx = await s.getCharacteristic(NUS_TX);
+  tx.addEventListener('characteristicvaluechanged', ev => {
+    resto += new TextDecoder().decode(ev.target.value);
+    let i;
+    while ((i = resto.indexOf('\n')) >= 0) { const l = resto.slice(0, i).trim(); resto = resto.slice(i + 1); if (l) linea(l); }
+  });
+  await tx.startNotifications();
+  $('conexion').textContent = 'conectado';
+  trabarPantalla();
+  $('btnConectar').hidden = true;
+  $('btnBuscar').disabled = $('btnDormir').disabled = false;
+  estado('Receptor conectado. Esperando datos del collar…');
+  enviar('estado');
+}
+
+async function desconectado() {
+  rx = null;
+  $('btnBuscar').disabled = $('btnDormir').disabled = true;
+  registrar({ t: 'app', evento: 'receptor_perdido' });
+  // Reintenta para siempre (cada 5 s): de noche el receptor puede reiniciarse o quedarse sin luz un rato
+  for (let i = 1; dispositivo; i++) {
+    $('conexion').textContent = 'reconectando… (' + i + ')';
+    estado('Se perdió el receptor. Reintentando…', 'alerta');
+    try { await abrir(); registrar({ t: 'app', evento: 'receptor_reconectado' }); return; }
+    catch (e) { await new Promise(r => setTimeout(r, 5000)); }
+  }
+}
+
+async function enviar(orden) {
+  if (!rx) return;
+  try { await rx.writeValue(new TextEncoder().encode(orden + '\n')); }
+  catch (e) { estado('No se pudo mandar la orden: ' + e.message, 'alerta'); }
+}
+
+$('btnConectar').onclick = conectar;
+$('btnBuscar').onclick = () => { enviar('buscar'); estado('Despertando al collar (tarda unos segundos)…'); };
+$('btnDormir').onclick = () => { enviar('dormir'); estado('Mandando a dormir al collar…'); };
+$('btnCentrar').onclick = () => marcador && mapa.setView(marcador.getLatLng(), Math.max(mapa.getZoom(), 16));
+
+// ---------- registro persistente: todo lo que llega queda guardado en el celular
+// (mismo formato que monitor/registro.jsonl: una linea JSON con la hora del celular y el dato crudo)
+const REG_MAX = 15000;
+let registro = leer('registro') || [];
+function infoRegistro() {
+  $('regInfo').textContent = registro.length + ' datos guardados en este celular' +
+    (registro.length ? ' desde ' + new Date(registro[0].t * 1000).toLocaleString('es-AR', { hour12: false }) : '');
+}
+function registrar(m) {
+  if (m.t === 'receptor') return;   // llega cada minuto y sin bateria no dice nada: llenaria el registro
+  registro.push({ t: Date.now() / 1000, crudo: m });
+  if (registro.length > REG_MAX) registro.splice(0, registro.length - REG_MAX);
+  guardar('registro', registro);
+  infoRegistro();
+}
+$('btnExportar').onclick = () => {
+  const txt = registro.map(r => JSON.stringify(r)).join('\n') + '\n';
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([txt], { type: 'application/x-ndjson' }));
+  a.download = 'juando_registro_' + new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '') + '.jsonl';
+  a.click();
+};
+infoRegistro();
+
+// ---------- pantalla prendida mientras la app esta abierta (si se apaga, Chrome corta el Bluetooth)
+let traba = null;
+async function trabarPantalla() {
+  try { if ('wakeLock' in navigator && !traba) { traba = await navigator.wakeLock.request('screen'); traba.onrelease = () => traba = null; } } catch (e) {}
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') trabarPantalla(); });
+
+// ---------- avisos de bateria del collar (notificacion en el celular)
+// Se revisa con cada dato que trae la tension (latido cada 6 h, posiciones durante la busqueda).
+// Cada umbral avisa una sola vez; se rearma cuando la bateria sube 10 puntos por encima (al cargarla).
+// Ojo: solo funciona mientras la app esta abierta y conectada al receptor; no hay servidor de push.
+// Los umbrales coinciden con la tabla de porciento(): 50 % = 3780 mV (MV_ALERTA_50), 10 % = 3580 mV (MV_ALERTA_10).
+const AVISOS_BAT = [
+  { p: 50, titulo: 'El collar se está descargando', texto: 'Le queda la mitad de la batería. Cargalo cuando puedas.' },
+  { p: 20, titulo: 'Hay que cargar el collar', texto: 'Le queda poca batería.' },
+  { p: 10, titulo: 'Cargá el collar ya', texto: 'La batería está casi vacía y se puede apagar.' },
+];
+function revisarBateria(mv) {
+  if (!mv) return;
+  const pc = porciento(mv);
+  let ya = (leer('avisados') || []).filter(p => pc <= p + 10);
+  const nuevos = AVISOS_BAT.filter(a => pc <= a.p && !ya.includes(a.p));
+  if (nuevos.length) {
+    const a = nuevos[nuevos.length - 1];          // el mas grave
+    avisar(a.titulo, a.texto + ' (' + pc + ' %)');
+    ya = ya.concat(nuevos.map(a => a.p));
+  }
+  guardar('avisados', ya);
+}
+async function avisar(titulo, texto) {
+  estado(titulo + '. ' + texto, 'alerta');
+  registrar({ t: 'app', evento: 'aviso', titulo });
+  try {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    const reg = await navigator.serviceWorker.ready;
+    await reg.showNotification(titulo, { body: texto, icon: './iconos/icono-192.png', tag: 'bateria',
+                                         renotify: true, vibrate: [300, 150, 300] });
+  } catch (e) { anotar('aviso: ' + e.message); }
+}
+function botonAvisos() {
+  $('btnAvisos').hidden = !('Notification' in window) || Notification.permission === 'granted';
+  if ('Notification' in window && Notification.permission === 'denied')
+    $('btnAvisos').textContent = 'Avisos bloqueados: habilitá las notificaciones de esta app en Ajustes';
+}
+$('btnAvisos').onclick = async () => {
+  if (Notification.permission === 'default') await Notification.requestPermission();
+  botonAvisos();
+};
+botonAvisos();
+
+// Pedir que Android no borre la app, los mapas ni el registro si se llena la memoria
+if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+
+// Arranque: la zona de la ultima posicion conocida (o la ultima elegida) y el service worker
+const u = leer('ultima');
+if (u) {
+  verZona(zonaDe(u.lat, u.lon) || leer('zona') || 'la_plata', false);
+  mapa.setView([u.lat, u.lon], 16);
+  posicion(u.lat, u.lon, '?');
+  marcador.bindPopup('Última posición · hace ' + hace(u.t));
+} else verZona(leer('zona') || 'la_plata', true);
+
+// Service worker. Cuando se publica una version nueva, el celular la baja sola (al abrir la app,
+// al volver a ella y cada 30 min) y aparece un aviso arriba; no se recarga solo para no cortar una busqueda.
+if ('serviceWorker' in navigator) {
+  const habiaVersion = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (habiaVersion) $('aviso').hidden = false; });
+  $('aviso').onclick = () => location.reload();
+  navigator.serviceWorker.register('./sw.js').then(reg => {
+    const revisar = () => reg.update().catch(() => {});   // sin internet falla y no pasa nada
+    setInterval(revisar, 30 * 60 * 1000);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') revisar(); });
+  }).catch(e => anotar('sw: ' + e.message));
+}
+</script>
+</body>
+</html>
