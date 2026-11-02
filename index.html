@@ -34,6 +34,8 @@
   #btnConectar { grid-column:1 / -1; background:var(--verde); color:#fff; }
   #btnBuscar { background:#e3efe7; color:var(--verde); }
   #btnDormir { background:#ecebe6; color:var(--tinta); }
+  #btnApagar { grid-column:1 / -1; padding:10px; font-size:14px; font-weight:500; background:transparent; color:var(--gris); border:1px solid var(--borde); }
+  #btnApagar.confirmar { color:var(--rojo); border-color:var(--rojo); }
   #btnCentrar { position:absolute; right:12px; top:72px; z-index:1000; padding:10px 12px; border-radius:10px;
     background:#fff; color:var(--tinta); box-shadow:0 1px 4px rgba(0,0,0,.25); font-size:14px; }
   #zonas { position:absolute; left:12px; top:72px; z-index:1000; display:flex; gap:6px; }
@@ -69,6 +71,7 @@
     <button id="btnConectar">Conectar receptor</button>
     <button id="btnBuscar" disabled>Buscar</button>
     <button id="btnDormir" disabled>Dormir</button>
+    <button id="btnApagar" disabled>Apagar receptor</button>
   </div>
   <details>
     <summary>Registro</summary>
@@ -85,7 +88,7 @@ const NUS_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';   // nos llegan lineas JS
 
 const RECEPTOR_CON_BATERIA = false;
 const $ = id => document.getElementById(id);
-let dispositivo, rx, resto = '', ultimo = null, marcador, centrado = false;
+let dispositivo, rx, resto = '', ultimo = null, marcador, centrado = false, apagado = false;
 
 // ---------- mapa offline
 // Cada zona es un recorte de OpenStreetMap (Protomaps) en mapas/*.pmtiles, hecho con
@@ -206,6 +209,8 @@ function linea(txt) {
     // El receptor todavia no tiene bateria: sin ella, la lectura es la salida del cargador y no
     // significa nada. Cuando tenga, poner RECEPTOR_CON_BATERIA en true.
     if (RECEPTOR_CON_BATERIA) $('conexion').textContent = 'receptor ' + porciento(m.mv) + ' %';
+  } else if (m.t === 'apagando') {
+    apagado = true;
   } else if (m.t === 'error') {
     estado('Error en el receptor: ' + txt, 'alerta');
   }
@@ -237,7 +242,8 @@ async function abrir() {
   $('conexion').textContent = 'conectado';
   trabarPantalla();
   $('btnConectar').hidden = true;
-  $('btnBuscar').disabled = $('btnDormir').disabled = false;
+  $('btnBuscar').disabled = $('btnDormir').disabled = $('btnApagar').disabled = false;
+  apagado = false;
   estado('Receptor conectado. Esperando datos del collar…');
   enviar('estado');
   // Si no hay un dato reciente del collar, pedirle la bateria (no prende el GPS; gasta muy poco)
@@ -246,12 +252,17 @@ async function abrir() {
 
 async function desconectado() {
   rx = null;
-  $('btnBuscar').disabled = $('btnDormir').disabled = true;
-  registrar({ t: 'app', evento: 'receptor_perdido' });
+  $('btnBuscar').disabled = $('btnDormir').disabled = $('btnApagar').disabled = true;
+  registrar({ t: 'app', evento: apagado ? 'receptor_apagado' : 'receptor_perdido' });
   // Reintenta para siempre (cada 5 s): de noche el receptor puede reiniciarse o quedarse sin luz un rato
   for (let i = 1; dispositivo; i++) {
-    $('conexion').textContent = 'reconectando… (' + i + ')';
-    estado('Se perdió el receptor. Reintentando…', 'alerta');
+    if (apagado) {
+      $('conexion').textContent = 'receptor apagado';
+      estado('Receptor apagado. Para prenderlo, tocá su botón: la app se conecta sola.');
+    } else {
+      $('conexion').textContent = 'reconectando… (' + i + ')';
+      estado('Se perdió el receptor. Reintentando…', 'alerta');
+    }
     try { await abrir(); registrar({ t: 'app', evento: 'receptor_reconectado' }); return; }
     catch (e) { await new Promise(r => setTimeout(r, 5000)); }
   }
@@ -266,6 +277,23 @@ async function enviar(orden) {
 $('btnConectar').onclick = conectar;
 $('btnBuscar').onclick = () => { enviar('buscar'); estado('Despertando al collar (tarda unos segundos)…'); };
 $('btnDormir').onclick = () => { enviar('dormir'); estado('Mandando a dormir al collar…'); };
+// Apagar pide un segundo toque (sin ventanas de confirmacion). Una vez apagado, la app no lo
+// puede prender: no tiene Bluetooth. Se prende con su boton y la app se reconecta sola.
+let tApagar = null;
+$('btnApagar').onclick = () => {
+  const b = $('btnApagar');
+  if (!tApagar) {
+    b.textContent = 'Tocá de nuevo para apagar (se prende con su botón)';
+    b.classList.add('confirmar');
+    tApagar = setTimeout(() => { tApagar = null; b.textContent = 'Apagar receptor'; b.classList.remove('confirmar'); }, 4000);
+    return;
+  }
+  clearTimeout(tApagar); tApagar = null;
+  b.textContent = 'Apagar receptor'; b.classList.remove('confirmar');
+  apagado = true;
+  enviar('apagar');
+  estado('Apagando el receptor…');
+};
 $('btnCentrar').onclick = () => marcador && mapa.setView(marcador.getLatLng(), Math.max(mapa.getZoom(), 16));
 
 // ---------- registro persistente: todo lo que llega queda guardado en el celular
